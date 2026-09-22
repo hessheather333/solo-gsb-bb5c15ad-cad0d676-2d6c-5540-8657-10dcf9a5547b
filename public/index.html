@@ -10,7 +10,7 @@
 <body>
   <header>
     <h1>🚧 临时施工区域冲突分析台</h1>
-    <p>导入带生效时间的 GeoJSON 区域，自动检测同时段空间冲突并给出错峰建议</p>
+    <p>导入带生效时间与资源占用的 GeoJSON 区域，自动检测同时段空间冲突与共享资源冲突，并给出错峰建议</p>
   </header>
 
   <main>
@@ -22,7 +22,7 @@
           <input type="file" id="fileInput" accept=".geojson,.json" />
           <button id="loadSampleBtn" type="button">加载示例</button>
         </div>
-        <textarea id="geojsonInput" rows="6" placeholder='粘贴 GeoJSON（FeatureCollection），要素需含 properties: {name, layer, start, end}'></textarea>
+        <textarea id="geojsonInput" rows="6" placeholder='粘贴 GeoJSON（FeatureCollection），要素需含 properties: {name, layer, start, end, resources?}'></textarea>
         <div class="row">
           <button id="importBtn" class="primary" type="button">导入</button>
           <button id="clearBtn" class="danger" type="button">清空全部区域</button>
@@ -62,6 +62,16 @@
       <div id="map"></div>
       <section class="card" id="resultsCard">
         <h2>冲突结果 <span id="conflictSummary" class="badge">未运行</span></h2>
+        <div class="row">
+          <label>冲突类型筛选
+            <select id="typeFilter">
+              <option value="all">全部</option>
+              <option value="spatial">空间冲突</option>
+              <option value="resource">资源冲突</option>
+              <option value="both">空间+资源冲突</option>
+            </select>
+          </label>
+        </div>
         <div id="conflictList" class="conflict-list"><em>运行分析后在此展示，按重叠面积降序排列。</em></div>
       </section>
     </section>

@@ -5,11 +5,32 @@ const { multiPolygonArea, centroidOfCoords } = require('./geo');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** 冲突类型：空间冲突 / 资源冲突 / 空间+资源冲突（两者同时满足时合并为一条） */
+const CONFLICT_TYPES = { SPATIAL: 'spatial', RESOURCE: 'resource', BOTH: 'both' };
+
 /** 解析时间字符串为毫秒时间戳；非法返回 null */
 function parseTime(value) {
   if (value === undefined || value === null || value === '') return null;
   const t = Date.parse(value);
   return Number.isNaN(t) ? null : t;
+}
+
+/**
+ * 规范化 properties.resources 为去重后的字符串数组。
+ * 兼容：字符串数组（标准）、逗号/顿号分隔的单个字符串、缺省。
+ */
+function normalizeResources(value) {
+  const parts = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/[,，、;；]/)
+      : [];
+  return [...new Set(
+    parts
+      .filter((r) => typeof r === 'string' || typeof r === 'number')
+      .map((r) => String(r).trim())
+      .filter(Boolean)
+  )];
 }
 
 function toISO(ms) {
@@ -42,6 +63,7 @@ function normalizeZone(feature, index) {
     layer: String(props.layer || props.group || '默认图层'),
     start: toISO(start),
     end: toISO(end),
+    resources: normalizeResources(props.resources),
     geometry: { type, coordinates },
     properties: props,
   };
@@ -58,8 +80,9 @@ function timeOverlap(a, b) {
  * 为一对冲突区域生成错峰建议。
  * 思路：把"开始更晚"的一方整体顺延到另一方结束之后；
  * 同时给出"提前收工"的备选方案（把先结束的一方压缩到另一方开工前）。
+ * 若双方存在共享资源，额外给出资源错峰/增配建议。
  */
-function buildSuggestions(zoneA, zoneB, overlap) {
+function buildSuggestions(zoneA, zoneB, overlap, sharedResources = []) {
   const suggestions = [];
   const overlapDays = (overlap.end - overlap.start) / DAY_MS;
 
@@ -97,6 +120,30 @@ function buildSuggestions(zoneA, zoneB, overlap) {
     });
   }
 
+  // 资源错峰建议：共享资源在重叠期内被双方同时占用
+  if (sharedResources.length) {
+    const resText = sharedResources.map((r) => `「${r}」`).join('、');
+    suggestions.push({
+      type: 'resource-stagger',
+      resources: sharedResources,
+      zone: later.name,
+      text: `资源错峰：重叠期 ${round1(overlapDays)} 天内 ${resText} 被双方同时占用，` +
+        `建议优先保障先开工的「${earlier.name}」，「${later.name}」待对方释放资源后再使用` +
+        `（可结合上方顺延/提前方案调整工期）。`,
+    });
+    suggestions.push({
+      type: 'resource-timeshare',
+      resources: sharedResources,
+      text: `分时复用：若工期无法错开，可将 ${resText} 按班次或日时段在双方间轮换` +
+        `（如「${earlier.name}」白天使用、「${later.name}」夜间使用），并建立交接台账。`,
+    });
+    suggestions.push({
+      type: 'resource-add',
+      resources: sharedResources,
+      text: `增配资源：评估为 ${resText} 增租或从其他标段调拨同类资源，避免因等资源造成窝工。`,
+    });
+  }
+
   // 方案三：若重叠期相对工期较短，提示可考虑工序穿插
   const shorterDuration = Math.min(zoneA.endMs - zoneA.startMs, zoneB.endMs - zoneB.startMs);
   if (overlap.end - overlap.start <= shorterDuration * 0.25) {
@@ -119,8 +166,11 @@ function fmtDate(ms) {
 }
 
 /**
- * 核心分析：对给定区域集合做两两时间+空间冲突检测。
- * @param {Array} zones 规范化后的区域（含 start/end ISO 字符串）
+ * 核心分析：对给定区域集合做两两时间+空间/资源冲突检测。
+ * - 时间重叠 + 空间相交 → 空间冲突（spatial）
+ * - 时间重叠 + 使用同一资源 → 资源冲突（resource）
+ * - 两者同时满足 → 合并为一条（both），标注共享资源与重叠时段
+ * @param {Array} zones 规范化后的区域（含 start/end ISO 字符串、resources 字符串数组）
  * @param {Object} options { layers?: string[], start?: string, end?: string }
  */
 function analyze(zones, options = {}) {
@@ -132,7 +182,12 @@ function analyze(zones, options = {}) {
 
   // 过滤 + 预处理
   const candidates = zones
-    .map((z) => ({ ...z, startMs: parseTime(z.start), endMs: parseTime(z.end) }))
+    .map((z) => ({
+      ...z,
+      startMs: parseTime(z.start),
+      endMs: parseTime(z.end),
+      resources: normalizeResources(z.resources),
+    }))
     .filter((z) => z.startMs !== null && z.endMs !== null)
     .filter((z) => !layerFilter || layerFilter.has(z.layer))
     .filter((z) => (rangeStart === null || z.endMs > rangeStart) && (rangeEnd === null || z.startMs < rangeEnd));
@@ -150,40 +205,60 @@ function analyze(zones, options = {}) {
       if (rangeEnd !== null) overlap.end = Math.min(overlap.end, rangeEnd);
       if (overlap.end <= overlap.start) continue;
 
-      // 空间相交（polygon-clipping 真实求交）
-      let intersection;
-      try {
-        intersection = pc.intersection(a.geometry.coordinates, b.geometry.coordinates);
-      } catch (err) {
-        // 个别退化几何跳过，不中断整体分析
-        continue;
-      }
-      if (!intersection || intersection.length === 0) continue;
+      // 共享资源（时间重叠 + 使用同一资源 → 资源冲突）
+      const sharedResources = a.resources.filter((r) => b.resources.includes(r));
 
-      const [refLon, refLat] = centroidOfCoords(intersection);
-      const areaM2 = multiPolygonArea(intersection, refLon, refLat);
-      if (areaM2 < 0.01) continue; // 忽略仅边界相接的零面积接触
+      // 空间相交（polygon-clipping 真实求交）
+      let intersection = null;
+      let areaM2 = 0;
+      try {
+        const raw = pc.intersection(a.geometry.coordinates, b.geometry.coordinates);
+        if (raw && raw.length) {
+          const [refLon, refLat] = centroidOfCoords(raw);
+          const area = multiPolygonArea(raw, refLon, refLat);
+          if (area >= 0.01) { // 忽略仅边界相接的零面积接触
+            intersection = raw;
+            areaM2 = area;
+          }
+        }
+      } catch (err) {
+        // 个别退化几何不中断整体分析，仅视为无空间相交
+      }
+
+      const hasSpatial = intersection !== null;
+      const hasResource = sharedResources.length > 0;
+      if (!hasSpatial && !hasResource) continue;
+
+      // 两者同时满足时合并为一条，标注 conflictType / sharedResources / 重叠时段
+      const conflictType = hasSpatial && hasResource
+        ? CONFLICT_TYPES.BOTH
+        : hasSpatial ? CONFLICT_TYPES.SPATIAL : CONFLICT_TYPES.RESOURCE;
 
       conflicts.push({
         id: `conflict-${conflicts.length + 1}`,
+        conflictType,
         zones: [
-          { id: a.id, name: a.name, layer: a.layer, start: a.start, end: a.end },
-          { id: b.id, name: b.name, layer: b.layer, start: b.start, end: b.end },
+          { id: a.id, name: a.name, layer: a.layer, start: a.start, end: a.end, resources: a.resources },
+          { id: b.id, name: b.name, layer: b.layer, start: b.start, end: b.end, resources: b.resources },
         ],
+        sharedResources,
         overlapStart: toISO(overlap.start),
         overlapEnd: toISO(overlap.end),
         overlapDays: round1((overlap.end - overlap.start) / DAY_MS),
         areaM2: Math.round(areaM2 * 100) / 100,
         areaHectares: Math.round(areaM2 / 100) / 100, // 公顷，保留两位
-        geometry: { type: 'MultiPolygon', coordinates: intersection },
-        suggestions: buildSuggestions(a, b, overlap),
+        geometry: hasSpatial ? { type: 'MultiPolygon', coordinates: intersection } : null,
+        suggestions: buildSuggestions(a, b, overlap, sharedResources),
       });
     }
   }
 
-  // 按重叠面积降序
-  conflicts.sort((x, y) => y.areaM2 - x.areaM2);
+  // 按重叠面积降序（纯资源冲突面积为 0，按重叠时长次排序）
+  conflicts.sort((x, y) => (y.areaM2 - x.areaM2) || (y.overlapDays - x.overlapDays));
   conflicts.forEach((c, idx) => { c.id = `conflict-${idx + 1}`; });
+
+  const conflictCountByType = { spatial: 0, resource: 0, both: 0 };
+  conflicts.forEach((c) => { conflictCountByType[c.conflictType] += 1; });
 
   return {
     generatedAt: new Date().toISOString(),
@@ -194,9 +269,10 @@ function analyze(zones, options = {}) {
     },
     zoneCount: candidates.length,
     conflictCount: conflicts.length,
+    conflictCountByType,
     totalConflictAreaM2: Math.round(conflicts.reduce((s, c) => s + c.areaM2, 0) * 100) / 100,
     conflicts,
   };
 }
 
-module.exports = { analyze, normalizeZone, parseTime };
+module.exports = { analyze, normalizeZone, normalizeResources, parseTime, CONFLICT_TYPES };

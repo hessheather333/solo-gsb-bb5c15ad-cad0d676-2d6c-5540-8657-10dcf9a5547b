@@ -66,7 +66,7 @@ textarea {
   margin-bottom: 8px;
 }
 
-input[type="text"], input[type="date"] {
+input[type="text"], input[type="date"], select {
   border: 1px solid #ccc;
   border-radius: 4px;
   padding: 5px 8px;
@@ -142,3 +142,18 @@ button.small { padding: 2px 8px; font-size: 12px; }
   font-size: 12px;
   margin-right: 4px;
 }
+.conflict-item .tag.resource {
+  background: #ffe8cc;
+  color: #8a4b00;
+}
+.conflict-item .type-badge {
+  display: inline-block;
+  color: #fff;
+  border-radius: 4px;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-weight: normal;
+  vertical-align: 2px;
+}
+.conflict-item.no-geometry { cursor: default; }
+.conflict-item.no-geometry:hover { background: #fff; }

@@ -7,7 +7,18 @@ const state = {
   layers: [],
   selectedLayers: new Set(),
   lastResult: null,
+  typeFilter: 'all',
 };
+
+// 冲突类型展示配置
+const CONFLICT_TYPES = {
+  spatial: { label: '空间冲突', color: '#d0000b' },
+  resource: { label: '资源冲突', color: '#e8590c' },
+  both: { label: '空间+资源冲突', color: '#9c36b5' },
+};
+function typeLabel(t) {
+  return (CONFLICT_TYPES[t] || {}).label || t || '空间冲突';
+}
 
 // ---------- 地图 ----------
 const map = L.map('map').setView([31.23, 121.47], 13);
@@ -63,11 +74,15 @@ function renderZones() {
 
   for (const z of state.zones) {
     const li = document.createElement('li');
+    const resTags = (z.resources || []).length
+      ? `<div class="meta">资源：${z.resources.map(escapeHtml).join('、')}</div>`
+      : '';
     li.innerHTML = `
       <span>
         <span class="badge" style="background:${layerColor(z.layer)};color:#fff">${escapeHtml(z.layer)}</span>
         <strong>${escapeHtml(z.name)}</strong>
         <div class="meta">${fmtDate(z.start)} ~ ${fmtDate(z.end)}</div>
+        ${resTags}
       </span>`;
     const del = document.createElement('button');
     del.className = 'danger small';
@@ -81,7 +96,8 @@ function renderZones() {
       {
         style: { color: layerColor(z.layer), weight: 2, fillOpacity: 0.15 },
         onEachFeature: (f, l) => l.bindPopup(
-          `<b>${escapeHtml(z.name)}</b><br>图层：${escapeHtml(z.layer)}<br>${fmtDate(z.start)} ~ ${fmtDate(z.end)}`
+          `<b>${escapeHtml(z.name)}</b><br>图层：${escapeHtml(z.layer)}<br>${fmtDate(z.start)} ~ ${fmtDate(z.end)}` +
+          ((z.resources || []).length ? `<br>资源：${z.resources.map(escapeHtml).join('、')}` : '')
         ),
       }
     );
@@ -174,51 +190,86 @@ async function runAnalysis() {
 }
 
 function renderConflicts(result) {
+  const counts = result.conflictCountByType || {
+    spatial: result.conflicts.filter((c) => c.conflictType === 'spatial').length,
+    resource: result.conflicts.filter((c) => c.conflictType === 'resource').length,
+    both: result.conflicts.filter((c) => c.conflictType === 'both').length,
+  };
   $('conflictSummary').textContent =
-    `${result.conflictCount} 处冲突 / 共 ${fmtArea(result.totalConflictAreaM2)}`;
+    `${result.conflictCount} 处冲突（空间 ${counts.spatial} / 资源 ${counts.resource} / 空间+资源 ${counts.both}）` +
+    ` · 重叠面积共 ${fmtArea(result.totalConflictAreaM2)}`;
 
   conflictsLayer.clearLayers();
   const list = $('conflictList');
   list.innerHTML = '';
 
+  // 按冲突类型筛选
+  const filtered = state.typeFilter === 'all'
+    ? result.conflicts
+    : result.conflicts.filter((c) => c.conflictType === state.typeFilter);
+
   if (!result.conflicts.length) {
-    list.innerHTML = '<em>未发现时空重叠冲突。</em>';
+    list.innerHTML = '<em>未发现时空重叠或共享资源冲突。</em>';
+    return;
+  }
+  if (!filtered.length) {
+    list.innerHTML = '<em>当前类型筛选下没有冲突，请切换筛选条件。</em>';
     return;
   }
 
-  result.conflicts.forEach((c, idx) => {
-    // 地图高亮相交区域
-    const geo = L.geoJSON(
-      { type: 'Feature', geometry: c.geometry, properties: c },
-      { style: { color: '#d0000b', weight: 2, fillColor: '#ff4d4f', fillOpacity: 0.45 } }
-    );
-    geo.bindPopup(
-      `<b>冲突 ${idx + 1}</b><br>${escapeHtml(c.zones.map((z) => z.name).join(' ∩ '))}<br>` +
-      `重叠面积：${fmtArea(c.areaM2)}<br>重叠期：${fmtDate(c.overlapStart)} ~ ${fmtDate(c.overlapEnd)}（${c.overlapDays} 天）`
-    );
-    geo.addTo(conflictsLayer);
+  filtered.forEach((c) => {
+    const idx = result.conflicts.indexOf(c); // 保持完整结果中的编号稳定
+    const typeInfo = CONFLICT_TYPES[c.conflictType] || CONFLICT_TYPES.spatial;
+
+    // 地图高亮相交区域（纯资源冲突无空间相交，不上图）
+    let geo = null;
+    if (c.geometry) {
+      geo = L.geoJSON(
+        { type: 'Feature', geometry: c.geometry, properties: c },
+        { style: { color: typeInfo.color, weight: 2, fillColor: typeInfo.color, fillOpacity: 0.45 } }
+      );
+      geo.bindPopup(
+        `<b>冲突 ${idx + 1}（${typeLabel(c.conflictType)}）</b><br>` +
+        `${escapeHtml(c.zones.map((z) => z.name).join(' ∩ '))}<br>` +
+        `重叠面积：${fmtArea(c.areaM2)}<br>重叠期：${fmtDate(c.overlapStart)} ~ ${fmtDate(c.overlapEnd)}（${c.overlapDays} 天）` +
+        ((c.sharedResources || []).length ? `<br>共享资源：${c.sharedResources.map(escapeHtml).join('、')}` : '')
+      );
+      geo.addTo(conflictsLayer);
+    }
 
     // 列表项
     const item = document.createElement('div');
     item.className = 'conflict-item';
+    item.style.borderLeftColor = typeInfo.color;
     const zoneTags = c.zones
       .map((z) => `<span class="tag">${escapeHtml(z.name)}（${escapeHtml(z.layer)}）</span>`)
       .join(' ');
+    const resTags = (c.sharedResources || []).length
+      ? `<br>共享资源：${c.sharedResources.map((r) => `<span class="tag resource">${escapeHtml(r)}</span>`).join(' ')}`
+      : '';
+    const areaLine = c.geometry ? `重叠面积 ${fmtArea(c.areaM2)}` : '无空间相交（仅资源冲突）';
     const suggestions = c.suggestions.map((s) => `<li>${escapeHtml(s.text)}</li>`).join('');
     item.innerHTML = `
-      <h3>#${idx + 1} 重叠面积 ${fmtArea(c.areaM2)}</h3>
+      <h3>
+        <span class="type-badge" style="background:${typeInfo.color}">${typeLabel(c.conflictType)}</span>
+        #${idx + 1} ${areaLine}
+      </h3>
       <div class="stats">
-        ${zoneTags}<br>
+        ${zoneTags}${resTags}<br>
         重叠时段：${fmtDate(c.overlapStart)} ~ ${fmtDate(c.overlapEnd)}（${c.overlapDays} 天）
       </div>
       <details>
         <summary>错峰建议（${c.suggestions.length} 条）</summary>
         <ul class="suggestions">${suggestions}</ul>
       </details>`;
-    item.onclick = () => {
-      map.fitBounds(geo.getBounds().pad(0.3));
-      geo.openPopup();
-    };
+    if (geo) {
+      item.onclick = () => {
+        map.fitBounds(geo.getBounds().pad(0.3));
+        geo.openPopup();
+      };
+    } else {
+      item.classList.add('no-geometry');
+    }
     list.appendChild(item);
   });
 }
@@ -234,10 +285,13 @@ async function refreshAnalyses() {
   }
   for (const a of analyses) {
     const li = document.createElement('li');
+    const typeInfo = a.conflictCountByType
+      ? `（空间 ${a.conflictCountByType.spatial} / 资源 ${a.conflictCountByType.resource} / 空间+资源 ${a.conflictCountByType.both}）`
+      : '';
     li.innerHTML = `
       <span>
         <strong>${escapeHtml(a.name)}</strong>
-        <div class="meta">${new Date(a.savedAt).toLocaleString('zh-CN')} · ${a.conflictCount} 处冲突 · ${fmtArea(a.totalConflictAreaM2)}</div>
+        <div class="meta">${new Date(a.savedAt).toLocaleString('zh-CN')} · ${a.conflictCount} 处冲突${typeInfo} · ${fmtArea(a.totalConflictAreaM2)}</div>
       </span>`;
     const btns = document.createElement('span');
     btns.className = 'row';
@@ -295,10 +349,17 @@ $('clearBtn').onclick = async () => {
   state.lastResult = null;
   $('conflictList').innerHTML = '<em>运行分析后在此展示，按重叠面积降序排列。</em>';
   $('conflictSummary').textContent = '未运行';
+  $('typeFilter').value = 'all';
+  state.typeFilter = 'all';
   await refreshZones();
 };
 
 $('analyzeBtn').onclick = runAnalysis;
+
+$('typeFilter').onchange = (e) => {
+  state.typeFilter = e.target.value;
+  if (state.lastResult) renderConflicts(state.lastResult);
+};
 
 $('saveAnalysisBtn').onclick = async () => {
   if (!state.lastResult) {

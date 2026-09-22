@@ -108,6 +108,7 @@ app.get('/api/analyses', (req, res) => {
     savedAt,
     params,
     conflictCount: result.conflictCount,
+    conflictCountByType: result.conflictCountByType || null,
     totalConflictAreaM2: result.totalConflictAreaM2,
   }));
   res.json({ analyses: list });
@@ -126,18 +127,21 @@ app.delete('/api/analyses/:id', (req, res) => {
   res.status(removed ? 204 : 404).end();
 });
 
-// 导出 GeoJSON 报告（相交区域 + 属性 + 建议）
+// 导出 GeoJSON 报告（相交区域 + 冲突类型 + 共享资源 + 建议）
 app.get('/api/analyses/:id/export', (req, res) => {
   const record = store.getAnalysis(req.params.id);
   if (!record) return res.status(404).json({ error: '分析不存在' });
 
+  // 纯资源冲突无空间相交几何，导出为 null geometry 的 Feature 以保留完整冲突清单
   const features = record.result.conflicts.map((c) => ({
     type: 'Feature',
-    geometry: c.geometry,
+    geometry: c.geometry || null,
     properties: {
       conflictId: c.id,
+      conflictType: c.conflictType,
       zones: c.zones.map((z) => z.name).join(' ∩ '),
       zoneDetails: c.zones,
+      sharedResources: c.sharedResources || [],
       overlapStart: c.overlapStart,
       overlapEnd: c.overlapEnd,
       overlapDays: c.overlapDays,
@@ -155,6 +159,7 @@ app.get('/api/analyses/:id/export', (req, res) => {
       generatedAt: record.result.generatedAt,
       params: record.params,
       conflictCount: record.result.conflictCount,
+      conflictCountByType: record.result.conflictCountByType || null,
       totalConflictAreaM2: record.result.totalConflictAreaM2,
     },
     features,
