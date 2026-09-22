@@ -66,7 +66,7 @@ textarea {
   margin-bottom: 8px;
 }
 
-input[type="text"], input[type="date"] {
+input[type="text"], input[type="date"], select {
   border: 1px solid #ccc;
   border-radius: 4px;
   padding: 5px 8px;
@@ -141,4 +141,34 @@ button.small { padding: 2px 8px; font-size: 12px; }
   padding: 0 6px;
   font-size: 12px;
   margin-right: 4px;
+}
+
+/* 冲突类型 */
+.conflict-item.type-resource { border-left-color: #e8590c; }
+.conflict-item.type-both { border-left-color: #9c36b5; }
+.conflict-item.type-resource:hover { background: #fdf8f2; }
+.conflict-item.type-both:hover { background: #faf5fc; }
+
+.type-badge {
+  display: inline-block;
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: normal;
+  color: #fff;
+  margin-right: 4px;
+  vertical-align: 1px;
+}
+.type-badge.type-spatial { background: #d0000b; }
+.type-badge.type-resource { background: #e8590c; }
+.type-badge.type-both { background: #9c36b5; }
+
+.res-tag {
+  display: inline-block;
+  background: #ffe8cc;
+  color: #8a4b00;
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 12px;
+  margin: 2px 4px 2px 0;
 }

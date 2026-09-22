@@ -7,7 +7,21 @@ const state = {
   layers: [],
   selectedLayers: new Set(),
   lastResult: null,
+  typeFilter: 'all',
 };
+
+// 冲突类型：标签与地图高亮颜色
+const CONFLICT_TYPES = {
+  spatial: { label: '空间冲突', color: '#d0000b' },
+  resource: { label: '资源冲突', color: '#e8590c' },
+  both: { label: '空间+资源', color: '#9c36b5' },
+};
+function typeLabel(t) {
+  return (CONFLICT_TYPES[t] || {}).label || t || '空间冲突';
+}
+function typeColor(t) {
+  return (CONFLICT_TYPES[t] || CONFLICT_TYPES.spatial).color;
+}
 
 // ---------- 地图 ----------
 const map = L.map('map').setView([31.23, 121.47], 13);
@@ -62,12 +76,16 @@ function renderZones() {
   const bounds = [];
 
   for (const z of state.zones) {
+    const resText = (z.resources && z.resources.length)
+      ? `<div class="meta">资源：${z.resources.map(escapeHtml).join('、')}</div>`
+      : '';
     const li = document.createElement('li');
     li.innerHTML = `
       <span>
         <span class="badge" style="background:${layerColor(z.layer)};color:#fff">${escapeHtml(z.layer)}</span>
         <strong>${escapeHtml(z.name)}</strong>
         <div class="meta">${fmtDate(z.start)} ~ ${fmtDate(z.end)}</div>
+        ${resText}
       </span>`;
     const del = document.createElement('button');
     del.className = 'danger small';
@@ -76,12 +94,15 @@ function renderZones() {
     li.appendChild(del);
     list.appendChild(li);
 
+    const resPopup = (z.resources && z.resources.length)
+      ? `<br>资源：${z.resources.map(escapeHtml).join('、')}`
+      : '';
     const geo = L.geoJSON(
       { type: 'Feature', geometry: z.geometry, properties: z },
       {
         style: { color: layerColor(z.layer), weight: 2, fillOpacity: 0.15 },
         onEachFeature: (f, l) => l.bindPopup(
-          `<b>${escapeHtml(z.name)}</b><br>图层：${escapeHtml(z.layer)}<br>${fmtDate(z.start)} ~ ${fmtDate(z.end)}`
+          `<b>${escapeHtml(z.name)}</b><br>图层：${escapeHtml(z.layer)}<br>${fmtDate(z.start)} ~ ${fmtDate(z.end)}${resPopup}`
         ),
       }
     );
@@ -174,50 +195,87 @@ async function runAnalysis() {
 }
 
 function renderConflicts(result) {
+  const counts = result.typeCounts || {
+    spatial: result.conflicts.filter((c) => (c.conflictType || 'spatial') === 'spatial').length,
+    resource: result.conflicts.filter((c) => c.conflictType === 'resource').length,
+    both: result.conflicts.filter((c) => c.conflictType === 'both').length,
+  };
   $('conflictSummary').textContent =
-    `${result.conflictCount} 处冲突 / 共 ${fmtArea(result.totalConflictAreaM2)}`;
+    `${result.conflictCount} 处冲突（空间 ${counts.spatial} · 资源 ${counts.resource} · 空间+资源 ${counts.both}）` +
+    ` / 空间重叠共 ${fmtArea(result.totalConflictAreaM2)}`;
 
   conflictsLayer.clearLayers();
   const list = $('conflictList');
   list.innerHTML = '';
 
-  if (!result.conflicts.length) {
-    list.innerHTML = '<em>未发现时空重叠冲突。</em>';
+  // 按冲突类型筛选
+  const shown = result.conflicts.filter(
+    (c) => state.typeFilter === 'all' || (c.conflictType || 'spatial') === state.typeFilter
+  );
+
+  if (!shown.length) {
+    list.innerHTML = result.conflicts.length
+      ? '<em>当前类型筛选下没有冲突，请切换筛选条件。</em>'
+      : '<em>未发现时空重叠冲突。</em>';
     return;
   }
 
-  result.conflicts.forEach((c, idx) => {
-    // 地图高亮相交区域
-    const geo = L.geoJSON(
-      { type: 'Feature', geometry: c.geometry, properties: c },
-      { style: { color: '#d0000b', weight: 2, fillColor: '#ff4d4f', fillOpacity: 0.45 } }
-    );
-    geo.bindPopup(
-      `<b>冲突 ${idx + 1}</b><br>${escapeHtml(c.zones.map((z) => z.name).join(' ∩ '))}<br>` +
-      `重叠面积：${fmtArea(c.areaM2)}<br>重叠期：${fmtDate(c.overlapStart)} ~ ${fmtDate(c.overlapEnd)}（${c.overlapDays} 天）`
-    );
-    geo.addTo(conflictsLayer);
+  shown.forEach((c, idx) => {
+    const cType = c.conflictType || 'spatial';
+    const color = typeColor(cType);
+    const shared = Array.isArray(c.sharedResources) ? c.sharedResources : [];
+
+    // 地图高亮相交区域（纯资源冲突无相交几何，不上图）
+    let geo = null;
+    if (c.geometry) {
+      geo = L.geoJSON(
+        { type: 'Feature', geometry: c.geometry, properties: c },
+        { style: { color, weight: 2, fillColor: color, fillOpacity: 0.45 } }
+      );
+      geo.bindPopup(
+        `<b>冲突 ${idx + 1}（${typeLabel(cType)}）</b><br>${escapeHtml(c.zones.map((z) => z.name).join(' ∩ '))}<br>` +
+        (shared.length ? `共享资源：${shared.map(escapeHtml).join('、')}<br>` : '') +
+        `重叠面积：${fmtArea(c.areaM2)}<br>重叠期：${fmtDate(c.overlapStart)} ~ ${fmtDate(c.overlapEnd)}（${c.overlapDays} 天）`
+      );
+      geo.addTo(conflictsLayer);
+    }
 
     // 列表项
     const item = document.createElement('div');
-    item.className = 'conflict-item';
+    item.className = `conflict-item type-${cType}`;
     const zoneTags = c.zones
       .map((z) => `<span class="tag">${escapeHtml(z.name)}（${escapeHtml(z.layer)}）</span>`)
       .join(' ');
+    const resTags = shared.length
+      ? `<div>共享资源：${shared.map((r) => `<span class="res-tag">${escapeHtml(r)}</span>`).join('')}</div>`
+      : '';
+    const areaText = c.geometry ? `重叠面积 ${fmtArea(c.areaM2)}` : '无空间重叠（仅资源冲突）';
     const suggestions = c.suggestions.map((s) => `<li>${escapeHtml(s.text)}</li>`).join('');
     item.innerHTML = `
-      <h3>#${idx + 1} 重叠面积 ${fmtArea(c.areaM2)}</h3>
+      <h3><span class="type-badge type-${cType}">${typeLabel(cType)}</span> #${idx + 1} ${areaText}</h3>
       <div class="stats">
         ${zoneTags}<br>
         重叠时段：${fmtDate(c.overlapStart)} ~ ${fmtDate(c.overlapEnd)}（${c.overlapDays} 天）
+        ${resTags}
       </div>
       <details>
         <summary>错峰建议（${c.suggestions.length} 条）</summary>
         <ul class="suggestions">${suggestions}</ul>
       </details>`;
     item.onclick = () => {
-      map.fitBounds(geo.getBounds().pad(0.3));
-      geo.openPopup();
+      if (geo) {
+        map.fitBounds(geo.getBounds().pad(0.3));
+        geo.openPopup();
+      } else {
+        // 纯资源冲突：定位到涉及区域的范围
+        const involved = state.zones.filter((z) => c.zones.some((cz) => cz.id === z.id));
+        if (!involved.length) return;
+        const group = L.geoJSON({
+          type: 'FeatureCollection',
+          features: involved.map((z) => ({ type: 'Feature', geometry: z.geometry, properties: {} })),
+        });
+        try { map.fitBounds(group.getBounds().pad(0.3)); } catch { /* ignore */ }
+      }
     };
     list.appendChild(item);
   });
@@ -233,11 +291,13 @@ async function refreshAnalyses() {
     return;
   }
   for (const a of analyses) {
+    const tc = a.typeCounts;
+    const typeText = tc ? `（空间 ${tc.spatial} · 资源 ${tc.resource} · 空间+资源 ${tc.both}）` : '';
     const li = document.createElement('li');
     li.innerHTML = `
       <span>
         <strong>${escapeHtml(a.name)}</strong>
-        <div class="meta">${new Date(a.savedAt).toLocaleString('zh-CN')} · ${a.conflictCount} 处冲突 · ${fmtArea(a.totalConflictAreaM2)}</div>
+        <div class="meta">${new Date(a.savedAt).toLocaleString('zh-CN')} · ${a.conflictCount} 处冲突${typeText} · ${fmtArea(a.totalConflictAreaM2)}</div>
       </span>`;
     const btns = document.createElement('span');
     btns.className = 'row';
@@ -299,6 +359,11 @@ $('clearBtn').onclick = async () => {
 };
 
 $('analyzeBtn').onclick = runAnalysis;
+
+$('typeFilter').onchange = () => {
+  state.typeFilter = $('typeFilter').value;
+  if (state.lastResult) renderConflicts(state.lastResult);
+};
 
 $('saveAnalysisBtn').onclick = async () => {
   if (!state.lastResult) {

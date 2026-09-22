@@ -85,4 +85,105 @@ for (let i = 1; i < result.conflicts.length; i++) {
   assert.ok(result.conflicts[i - 1].areaM2 >= result.conflicts[i].areaM2, '结果应按面积降序');
 }
 
+// 8. 纯空间冲突的类型标注（无 resources 时）
+result = analyze(zones);
+assert.strictEqual(result.conflicts[0].conflictType, 'spatial');
+assert.strictEqual(result.conflicts[0].conflictTypeLabel, '空间冲突');
+assert.deepStrictEqual(result.conflicts[0].sharedResources, []);
+assert.strictEqual(result.typeCounts.spatial, 1);
+assert.strictEqual(result.typeCounts.resource, 0);
+assert.strictEqual(result.typeCounts.both, 0);
+
+// 9. 资源冲突：时间重叠 + 共用资源，但空间不相交
+const zones3 = [
+  {
+    id: 'r1', name: 'R1', layer: '土建',
+    start: '2026-10-01T00:00:00.000Z', end: '2026-10-31T00:00:00.000Z',
+    resources: ['塔吊'],
+    geometry: square(121.470, 31.228, 121.474, 31.231),
+  },
+  {
+    id: 'r2', name: 'R2', layer: '市政',
+    start: '2026-10-10T00:00:00.000Z', end: '2026-11-10T00:00:00.000Z',
+    resources: ['塔吊', '泵车'],
+    geometry: square(121.500, 31.250, 121.504, 31.253), // 与 R1 空间不相交
+  },
+  {
+    id: 'r3', name: 'R3', layer: '临建',
+    start: '2026-10-05T00:00:00.000Z', end: '2026-10-20T00:00:00.000Z',
+    resources: ['挖掘机'], // 与 R1/R2 时间重叠但无共用资源
+    geometry: square(121.520, 31.260, 121.524, 31.263),
+  },
+];
+result = analyze(zones3);
+assert.strictEqual(result.conflictCount, 1, '只应有 R1∩R2 一处资源冲突');
+const rc = result.conflicts[0];
+assert.strictEqual(rc.conflictType, 'resource');
+assert.strictEqual(rc.conflictTypeLabel, '资源冲突');
+assert.deepStrictEqual(rc.sharedResources, ['塔吊']);
+assert.strictEqual(rc.geometry, null, '纯资源冲突无相交几何');
+assert.strictEqual(rc.areaM2, 0);
+assert.strictEqual(rc.overlapStart, '2026-10-10T00:00:00.000Z');
+assert.strictEqual(rc.overlapEnd, '2026-10-31T00:00:00.000Z');
+assert.ok(rc.suggestions.some((s) => s.type === 'resource-stagger'), '资源冲突应给出资源错峰建议');
+assert.ok(rc.suggestions.some((s) => s.text.includes('塔吊')), '建议应点名共享资源');
+assert.strictEqual(result.typeCounts.resource, 1);
+
+// 10. 空间+资源同时满足时合并为一条 both 冲突
+const zones4 = [
+  {
+    id: 's1', name: 'S1', layer: '土建',
+    start: '2026-10-01T00:00:00.000Z', end: '2026-10-31T00:00:00.000Z',
+    resources: ['塔吊'],
+    geometry: square(121.470, 31.228, 121.474, 31.231),
+  },
+  {
+    id: 's2', name: 'S2', layer: '市政',
+    start: '2026-10-10T00:00:00.000Z', end: '2026-11-10T00:00:00.000Z',
+    resources: ['塔吊'],
+    geometry: square(121.472, 31.229, 121.476, 31.232), // 与 S1 空间相交
+  },
+];
+result = analyze(zones4);
+assert.strictEqual(result.conflictCount, 1, '空间+资源应合并为一条冲突');
+assert.strictEqual(result.conflicts[0].conflictType, 'both');
+assert.strictEqual(result.conflicts[0].conflictTypeLabel, '空间+资源冲突');
+assert.deepStrictEqual(result.conflicts[0].sharedResources, ['塔吊']);
+assert.ok(result.conflicts[0].areaM2 > 0, '合并冲突仍保留重叠面积');
+assert.ok(result.conflicts[0].geometry && result.conflicts[0].geometry.type === 'MultiPolygon');
+assert.strictEqual(result.typeCounts.both, 1);
+
+// 11. 共用多个资源时全部列出
+const zones5 = [
+  {
+    id: 'm1', name: 'M1', layer: '土建',
+    start: '2026-10-01T00:00:00.000Z', end: '2026-10-31T00:00:00.000Z',
+    resources: ['塔吊', '泵车', '挖掘机'],
+    geometry: square(121.470, 31.228, 121.474, 31.231),
+  },
+  {
+    id: 'm2', name: 'M2', layer: '市政',
+    start: '2026-10-10T00:00:00.000Z', end: '2026-11-10T00:00:00.000Z',
+    resources: ['泵车', '塔吊'],
+    geometry: square(121.500, 31.250, 121.504, 31.253),
+  },
+];
+result = analyze(zones5);
+assert.deepStrictEqual(result.conflicts[0].sharedResources, ['塔吊', '泵车'], '共享资源按先声明方顺序去重列出');
+
+// 12. normalizeZone 解析 resources
+const nzRes = normalizeZone({
+  type: 'Feature',
+  geometry: square(0, 0, 1, 1),
+  properties: { name: 'R', start: '2026-01-01', end: '2026-02-01', resources: ['塔吊', ' 泵车 ', '塔吊', ''] },
+}, 0);
+assert.deepStrictEqual(nzRes.resources, ['塔吊', '泵车'], 'resources 应去空白并去重');
+const nzStr = normalizeZone({
+  type: 'Feature',
+  geometry: square(0, 0, 1, 1),
+  properties: { name: 'R', start: '2026-01-01', end: '2026-02-01', resources: '塔吊, 泵车' },
+}, 0);
+assert.deepStrictEqual(nzStr.resources, ['塔吊', '泵车'], '兼容逗号分隔的字符串');
+assert.deepStrictEqual(nz.resources, [], '缺省 resources 应为空数组');
+
 console.log('✅ 全部测试通过');
